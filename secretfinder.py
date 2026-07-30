@@ -36,6 +36,8 @@ from urllib.parse import urlparse
 # regex
 _regex = {
     # --- 1. GRUP: SİZİN MEVCUT VE DÜZELTİLMİŞ PATTERNLERİNİZ ---
+    'claude_api'                    : r'\bsk-ant-api[0-9]{2}-[A-Za-z0-9_-]{20,}\b',
+    'openai_api'                    : r'\bsk-proj-[A-Za-z0-9_-]{20,}\b',
     'google_api'                    : r'AIza[0-9A-Za-z-_]{35}',
     'firebase'                      : r'AAAA[A-Za-z0-9_-]{7}:[A-Za-z0-9_-]{140}',
     'google_captcha'                : r'6L[0-9A-Za-z-_]{38}|^6[0-9a-zA-Z_-]{39}$',
