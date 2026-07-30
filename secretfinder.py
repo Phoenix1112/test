@@ -70,7 +70,7 @@ _regex = {
     'ssh_dc_private_key'            : r'-----BEGIN EC PRIVATE KEY-----',
     'pgp_private_block'             : r'-----BEGIN PGP PRIVATE KEY BLOCK-----',
     'json_web_token'                : r'ey[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*$', # Post-process şart!
-    'slack_token'                   : r"\"api_token\":\"(xox[a-zA-Z]-[a-zA-Z0-9-]+)\"",
+    'slack_token'                   : r"xox[a-zA-Z]-[a-zA-Z0-9-]+",
     'SSH_privKey'                   : r"([-]+BEGIN [^\s]+ PRIVATE KEY[-]+[\s]*[^-]*[-]+END [^\s]+ PRIVATE KEY[-]+)",
     'Heroku API KEY'                : r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}',
     'possible_Creds'                : r"(?i)(password\s*[`=:\"]+\s*[^\s]+|password is\s*[`=:\"]*\s*[^\s]+|pwd\s*[`=:\"]*\s*[^\s]+|passwd\s*[`=:\"]+\s*[^\s]+)",
