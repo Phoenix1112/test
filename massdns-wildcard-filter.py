@@ -11,7 +11,7 @@ Kullanım:
 Parametreler:
     -f, --file      Girdi dosyası (zorunlu)
     -t, --threshold Eşik değeri (varsayılan: 10). Aynı IP veya CNAME hedefine sahip
-                    benzersiz subdomain sayısı bu değeri aşıyorsa, o IP/CNAME'ye
+                    benzersiz subdomain sayısı bu değeri aşıyorsa, o IP/CNAME'ye 
                     sahip TÜM subdomainler filtrelenir.
     -o, --output    Çıktı dosyası (varsayılan: filtered_massdns_output.txt)
     -v, --verbose   Detaylı çıktı
