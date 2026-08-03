@@ -3,8 +3,23 @@ import requests
 
 import arjun.core.config as mem
 from arjun.core.utils import populate
-
+from urllib.parse import urlsplit, urlunsplit
 from arjun.core.utils import create_query_string
+
+
+def ensure_root_slash(url):
+    parts = urlsplit(url)
+
+    if parts.path == "":
+        return urlunsplit((
+            parts.scheme,
+            parts.netloc,
+            "/",
+            parts.query,
+            parts.fragment
+        ))
+
+    return url
 
 
 def json_export(result):
@@ -39,7 +54,7 @@ def text_export(result):
     """
     with open(mem.var['text_file'], 'a+', encoding='utf8') as text_file:
         for url, data in result.items():
-            clean_url = url.lstrip('/')
+            clean_url = ensure_root_slash(url.lstrip('/'))
             if data['method'] == 'JSON':
                 text_file.write(clean_url + '\t' + json.dumps(populate(data['params'])) + '\n')
             else:
