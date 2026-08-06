@@ -8,7 +8,9 @@ from arjun.core.utils import extract_js
 re_words = re.compile(r'[A-Za-z][A-Za-z0-9_]*')
 re_not_junk = re.compile(r'^[A-Za-z0-9_]+$')
 re_inputs = re.compile(r'''(?i)<(?:input|textarea)[^>]+?(?:id|name)=["']?([^"'\s>]+)''')
-re_empty_vars = re.compile(r'''(?:[;\n]|\bvar|\blet)(\w+)\s*=\s*(?:['"`]{1,2}|true|false|null)''')
+re_candidate_vars = re.compile(
+    r'''(?:var|let|const)\s+([A-Za-z_][A-Za-z0-9_]*)\s*='''
+)
 re_map_keys = re.compile(r'''['"](\w+?)['"]\s*:\s*['"`]''')
 re_getparam = re.compile(
     r'''getParam\s*\(\s*["']([^"']+)["']\s*\)'''
@@ -40,6 +42,15 @@ re_url_source_assign = re.compile(
     re.X
 )
 
+JS_BUILTINS = {
+    "window", "document", "location", "navigator", "history",
+    "console", "Math", "JSON", "Object", "Array",
+    "String", "Number", "Boolean", "Date", "RegExp",
+    "Promise", "fetch", "XMLHttpRequest",
+    "URL", "URLSearchParams",
+    "params"
+}
+
 def is_not_junk(param):
     return (re_not_junk.match(param) is not None)
 
@@ -62,8 +73,11 @@ def heuristic(raw_response, wordlist):
 
     # Parse Scripts
     for script in extract_js(response):
-        empty_vars = re_empty_vars.findall(script)
-        potential_params += empty_vars
+        candidate_vars = [
+            x for x in re_candidate_vars.findall(script)
+            if x not in JS_BUILTINS
+        ]
+        potential_params += candidate_vars
 
         map_keys = re_map_keys.findall(script)
         potential_params += map_keys
