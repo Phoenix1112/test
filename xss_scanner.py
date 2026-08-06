@@ -121,6 +121,119 @@ def get_payloads():
 
 
 # ── XSS Detection Functions ─────────────────────────────────────
+def classify_context(html, idx):
+    """
+    Classify the HTML/JS context that the reflected marker at position `idx`
+    in `html` lands in. Returns one of:
+      "double_quoted" - inside an HTML attribute value delimited by "
+      "single_quoted" - inside an HTML attribute value delimited by '
+      "unquoted_attr" - directly after '=' in an HTML attribute, no quote
+      "js_unquoted"   - directly after '=' in a bare JS assignment in <script>
+      "text"          - plain HTML text content (not inside a tag)
+      "tag_other"     - inside a tag's attribute list, but not part of any
+                        value (e.g. between attributes) - not injectable
+
+    This replaces the old approach of blindly rfind()-ing the nearest '='
+    within a fixed character window. That approach broke as soon as ANY
+    other '=' happened to sit closer to the marker than the real delimiter -
+    e.g. a query string echoed inside an href/RetURL attribute
+    (href="...?x=1&y=hacktivist1337") has its own internal '=' characters,
+    and text like "You searched for 'X'" isn't inside a tag/attribute at
+    all. Both cases were being misclassified as "unquoted" before, because
+    the code never checked whether it was actually still inside an already
+    -open quoted value, or even inside a tag at all.
+
+    The fix: find whether idx sits inside an open tag (last '<' after the
+    last '>'), and if so, walk forward from the tag start tracking quote
+    state character-by-character, so an '=' that is merely literal text
+    *inside* an already-open attribute value is never mistaken for a fresh,
+    unquoted assignment.
+    """
+    last_lt = html.rfind("<", 0, idx)
+    last_gt = html.rfind(">", 0, idx)
+
+    if last_gt > last_lt:
+        # idx is in plain text content, not inside any tag's attribute list -
+        # unless this text is the raw body of a <script> element, where a
+        # bare JS assignment can still be an unquoted-exploitable sink.
+        if is_inside_script_block(html, idx):
+            script_start = html.rfind("<script", 0, idx)
+            script_tag = html[script_start:script_start + 200]
+            if "application/ld+json" in script_tag.lower():
+                return "text"
+            before = html[max(0, idx - 200):idx]
+            eq_pos = before.rfind("=")
+            if eq_pos == -1:
+                return "text"
+            after_eq = before[eq_pos + 1:].strip()
+            if after_eq[:1] == '"':
+                return "double_quoted"
+            if after_eq[:1] == "'":
+                return "single_quoted"
+            return "js_unquoted"
+        return "text"
+
+    # idx is inside an open HTML tag (its attribute-list region). Track
+    # quote state from the tag's own start so we never leak state from a
+    # previous, already-closed tag.
+    tag_start = last_lt
+    state = None  # None | '"' | "'"
+    i = tag_start + 1
+    while i < idx:
+        c = html[i]
+        if state is None:
+            if c in ('"', "'"):
+                state = c
+        else:
+            if c == state:
+                state = None
+        i += 1
+
+    if state == '"':
+        return "double_quoted"
+    if state == "'":
+        return "single_quoted"
+
+    eq_pos = html.rfind("=", tag_start + 1, idx)
+    if eq_pos == -1:
+        return "tag_other"
+    return "unquoted_attr"
+
+
+def is_unquoted_reflection(html, idx):
+    """True only for a genuine unquoted HTML attribute or bare JS value."""
+    return classify_context(html, idx) in ("unquoted_attr", "js_unquoted")
+
+
+async def has_new_attribute_named(page, needle):
+    """
+    Return True if any element in the live DOM has an attribute whose NAME
+    (not value!) contains `needle`. This is the reliable signal that an
+    injected quote/space actually broke OUT of an existing attribute value -
+    the browser re-parses the broken markup and mints a brand-new attribute
+    out of whatever followed the break. Merely finding the marker inside an
+    attribute's VALUE proves nothing: a properly-escaped, 100%-safe
+    reflection also contains that substring in the value.
+    """
+    try:
+        return bool(await page.evaluate(
+            """(needle) => {
+                const all = document.querySelectorAll("*");
+                for (const el of all) {
+                    for (const attr of el.attributes) {
+                        if (attr.name.toLowerCase().includes(needle)) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }""",
+            needle,
+        ))
+    except Exception:
+        return False
+
+
 async def check_unquoted_attribute_xss(page, param_name, url_tested):
     try:
         html = await page.content()
@@ -129,18 +242,8 @@ async def check_unquoted_attribute_xss(page, param_name, url_tested):
             idx = html.find(XSS_TEST_STRING, idx)
             if idx == -1:
                 break
-            before = html[max(0, idx - 100):idx]
-            eq_pos = before.rfind("=")
-            if eq_pos != -1:
-                after_eq = before[eq_pos + 1:].strip()
-                if after_eq and after_eq[0] not in ('"', "'"):
-                    script_start = html.rfind("<script", 0, idx)
-                    if script_start != -1:
-                        script_tag = html[script_start:script_start + 200]
-                        if "application/ld+json" in script_tag.lower():
-                            idx += 1
-                            continue
-                    return True
+            if is_unquoted_reflection(html, idx):
+                return True
             idx += 1
         return False
     except Exception as e:
@@ -148,75 +251,74 @@ async def check_unquoted_attribute_xss(page, param_name, url_tested):
 
 
 async def check_double_quote_xss(page, param_name, url_tested):
+    """
+    Confirms a REAL double-quote breakout, not just the presence of the
+    marker inside some attribute's value (which is trivially true for any
+    safe, properly-escaped reflection too - e.g. a RetURL/redirect link
+    that happens to echo the current query string).
+
+    Two independent, both-real signals:
+      1) A brand new attribute NAME appeared in the DOM (the injected
+         quote closed the original attribute early and the browser turned
+         the rest of our payload into a fresh attribute).
+      2) The raw payload's quote character (") is found immediately
+         preceding the marker in the page source AND, at that exact
+         position, quote-state tracking shows we really were inside an
+         open double-quoted value that our quote then closed.
+    """
     try:
-        html = await page.content()
-        patterns = [
-            r'="[^"]*"hacktivist1337',
-            r'="[^"]*" hacktivist1337',
-            r'="[^"]*hacktivist1337"',
-        ]
-        for pattern in patterns:
-            if re.search(pattern, html):
-                return True
-        elements = await page.evaluate("""
-            () => {
-                const results = [];
-                const all = document.querySelectorAll("*");
-                for (let el of all) {
-                    for (let attr of el.attributes) {
-                        if (attr.value.includes("hacktivist1337")) {
-                            const outer = el.outerHTML;
-                            const dqPattern = new RegExp(attr.name + '="([^"]*)hacktivist1337');
-                            if (dqPattern.test(outer)) {
-                                results.push({tag: el.tagName, attr: attr.name, value: attr.value});
-                            }
-                        }
-                    }
-                }
-                return results;
-            }
-        """)
-        if elements and len(elements) > 0:
+        if await has_new_attribute_named(page, XSS_TEST_STRING.lower()):
             return True
+        html = await page.content()
+        idx = 0
+        while True:
+            idx = html.find('"' + XSS_TEST_STRING, idx)
+            if idx == -1:
+                break
+            if classify_context(html, idx) == "double_quoted":
+                return True
+            idx += 1
         return False
     except Exception as e:
         return False
 
 
 async def check_single_quote_xss(page, param_name, url_tested):
+    """Mirror of check_double_quote_xss for the ' payload - see its
+    docstring for why both a new-attribute-name signal and a quote-state
+    check are used instead of a naive substring/regex match."""
     try:
-        html = await page.content()
-        patterns = [
-            r"='[^']*'hacktivist1337",
-            r"='[^']*' hacktivist1337",
-            r"='[^']*hacktivist1337'",
-        ]
-        for pattern in patterns:
-            if re.search(pattern, html):
-                return True
-        elements = await page.evaluate("""
-            () => {
-                const results = [];
-                const all = document.querySelectorAll("*");
-                for (let el of all) {
-                    for (let attr of el.attributes) {
-                        if (attr.value.includes("hacktivist1337")) {
-                            const outer = el.outerHTML;
-                            const sqPattern = new RegExp(attr.name + "='([^']*)hacktivist1337");
-                            if (sqPattern.test(outer)) {
-                                results.push({tag: el.tagName, attr: attr.name, value: attr.value});
-                            }
-                        }
-                    }
-                }
-                return results;
-            }
-        """)
-        if elements and len(elements) > 0:
+        if await has_new_attribute_named(page, XSS_TEST_STRING.lower()):
             return True
+        html = await page.content()
+        idx = 0
+        while True:
+            idx = html.find("'" + XSS_TEST_STRING, idx)
+            if idx == -1:
+                break
+            if classify_context(html, idx) == "single_quoted":
+                return True
+            idx += 1
         return False
     except Exception as e:
         return False
+
+
+def is_inside_script_block(html, idx):
+    """
+    True if idx sits inside the raw-text content of a <script>...</script>
+    element (i.e. before the browser reaches the matching closing tag).
+    Browsers parse <script> content as raw text, not HTML - so a literal
+    '<tag>' found in there is never turned into a real DOM element and
+    can't be exploited as HTML tag injection there.
+    """
+    script_start = html.rfind("<script", 0, idx)
+    if script_start == -1:
+        return False
+    close_idx = html.find("</script", script_start)
+    if close_idx == -1 or close_idx > idx:
+        return True
+    return False
 
 
 async def check_html_tag_xss(page, param_name, url_tested):
@@ -229,11 +331,17 @@ async def check_html_tag_xss(page, param_name, url_tested):
         """)
         if exists:
             return True
+
         html = await page.content()
-        if "<hacktivist1337>" in html and "&lt;hacktivist1337&gt;" not in html:
-            return True
-        if "</hacktivist1337>" in html and "&lt;/hacktivist1337&gt;" not in html:
-            return True
+        for marker in ("<hacktivist1337>", "</hacktivist1337>"):
+            encoded = marker.replace("<", "&lt;").replace(">", "&gt;")
+            if encoded in html:
+                continue
+            idx = html.find(marker)
+            while idx != -1:
+                if not is_inside_script_block(html, idx):
+                    return True
+                idx = html.find(marker, idx + 1)
         return False
     except Exception as e:
         return False
@@ -354,20 +462,9 @@ class XSSScanner:
                     reflected_params.append(param_name)
                     idx = html.find(marker)
                     while idx != -1:
-                        before = html[max(0, idx - 100):idx]
-                        eq_pos = before.rfind("=")
-                        if eq_pos != -1:
-                            after_eq = before[eq_pos + 1:].strip()
-                            if after_eq and after_eq[0] not in ('"', "'"):
-                                script_start = html.rfind("<script", 0, idx)
-                                if script_start != -1:
-                                    script_tag = html[script_start:script_start + 200]
-                                    if "application/ld+json" not in script_tag.lower():
-                                        unquoted_attrs.append(param_name)
-                                        break
-                                else:
-                                    unquoted_attrs.append(param_name)
-                                    break
+                        if is_unquoted_reflection(html, idx):
+                            unquoted_attrs.append(param_name)
+                            break
                         idx = html.find(marker, idx + 1)
             if not reflected_params:
                 return None
@@ -420,21 +517,26 @@ class XSSScanner:
             await page.close()
 
     async def scan_xss_on_reflection(self, context, reflection_data):
-        """Test XSS immediately when reflection found"""
+        """Test XSS immediately when reflection found - tests ALL parameters regardless of findings"""
         base_url = reflection_data["url"]
         params = reflection_data["parametre"].split(",")
         unquoted_attrs_str = reflection_data.get("attribute", "")
         unquoted_attrs = unquoted_attrs_str.split(",") if unquoted_attrs_str else []
+        any_found = False
 
+        # 1) Önce tırnaksız attribute parametrelerini dene (XSS bulunsa bile devam et)
         for attr_param in unquoted_attrs:
             if attr_param and attr_param in params:
                 found, test_url = await self.test_unquoted_attribute(context, base_url, attr_param)
                 if found:
                     self.xss_count += 1
-                    msg = "[xss-found][" + attr_param + "] " + test_url
+                    msg = "[xss-found][unquoted][" + attr_param + "] " + test_url
                     self.log(msg)
-                    return True
+                    any_found = True
+                # NOT: return True yok - diğer parametrelere devam ediyoruz
 
+        # 2) Tüm reflected parametreler için normal payloadları dene
+        #    (attribute olanlar da dahil - farklı payloadlar farklı sonuç verebilir)
         payloads = get_payloads()
         for param_name in params:
             if not param_name:
@@ -443,10 +545,12 @@ class XSSScanner:
                 found, test_url = await self.test_payload(context, base_url, param_name, payload_type, payload_value)
                 if found:
                     self.xss_count += 1
-                    msg = "[xss-found][" + param_name + "] " + test_url
+                    msg = "[xss-found][" + payload_type + "][" + param_name + "] " + test_url
                     self.log(msg)
-                    return True
-        return False
+                    any_found = True
+                # NOT: return True yok - diğer payloadlara ve parametrelere devam ediyoruz
+
+        return any_found
 
     async def process_url(self, context, url, index):
         """Process single URL: reflection + immediate XSS test"""
