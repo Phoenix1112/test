@@ -26,8 +26,18 @@ re_url_object_searchparams = re.compile(
     r'''new\s+URL\s*\([^)]*\)\.searchParams\.get\s*\(\s*["']([^"']+)["']\s*\)'''
 )
 
-re_var_assign = re.compile(
-    r'''(?:var|let|const)\s+([A-Za-z_][A-Za-z0-9_]*)\s*='''
+re_url_source_assign = re.compile(
+    r'''(?:var|let|const)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*
+        (?:
+            getParam\s*\(
+            |params\.get\s*\(
+            |[A-Za-z_][A-Za-z0-9_]*\.searchParams\.get\s*\(
+            |new\s+URLSearchParams\s*\([^)]*\)\.get\s*\(
+            |location\.search
+            |window\.location\.search
+            |document\.location\.search
+        )''',
+    re.X
 )
 
 def is_not_junk(param):
@@ -70,8 +80,8 @@ def heuristic(raw_response, wordlist):
         urlobjparams = re_url_object_searchparams.findall(script)
         potential_params += urlobjparams
 
-        varassigns = re_var_assign.findall(script)
-        potential_params += varassigns
+        url_source_assigns = re_url_source_assign.findall(script)
+        potential_params += url_source_assigns
 
     if len(potential_params) == 0:
         return [], words_exist
